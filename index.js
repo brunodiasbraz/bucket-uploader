@@ -1,73 +1,82 @@
+// Uso: node process_uniqueids.js 2025-05-01 2025-05-31
+
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
-import FormData from 'form-data';
-import dotenv from 'dotenv';
+import { db } from './db.js';
 
-dotenv.config();
+const ERROR_LOG = path.resolve('./error_uniqueid.log');
+const SUCCESS_LOG = path.resolve('./success_uniqueid.log');
 
-const BASE_DIR = process.env.BASE_DIR + '/2025/08';
-const WALLET_NAME = process.env.WALLET_NAME;
-const BUCKET_URL = process.env.BUCKET_URL;
-const LOG_FILE = path.join(process.cwd(), 'error.log'); // arquivo de log na raiz do projeto
+const API_ENDPOINT = process.env.API_ENDPOINT;
 
-/**
- * Função recursiva para percorrer todos os diretórios e coletar arquivos .wav
- */
-async function uploadAudios(dir) {
-  const items = fs.readdirSync(dir, { withFileTypes: true });
+const [, , DATE_FROM_ARG, DATE_TO_ARG] = process.argv;
+const DATE_FROM = DATE_FROM_ARG || process.env.DATE_FROM || null;
+const DATE_TO = DATE_TO_ARG || process.env.DATE_TO || null;
 
-  for (const item of items) {
-    const fullPath = path.join(dir, item.name);
+if (!DATE_FROM || !DATE_TO) {
+    console.error('Uso: node process_uniqueids.js <DATE_FROM> <DATE_TO>');
+    console.error('Ex: node process_uniqueids.js 2025-05-01 2025-05-31');
+    process.exit(1);
+}
 
-    if (item.isDirectory()) {
-      await uploadAudios(fullPath);
-    } else if (item.isFile() && item.name.endsWith('.wav')) {
-      await processAndUpload(fullPath);
+// util
+function appendLog(file, msg) {
+    fs.appendFileSync(file, msg + '\n');
+}
+
+async function fetchUniqueIds(connection, fromDate, toDate) {
+    const sql = `
+    SELECT recording_unique_id AS uniqueid
+    FROM vw_successful_calls_with_recordings
+    WHERE DATE(call_init) BETWEEN ? AND ?
+    GROUP BY recording_unique_id
+    ORDER BY call_init ASC
+  `;
+
+    const [rows] = await connection.execute(sql, [fromDate, toDate]);
+    return rows.map(r => r.uniqueid).filter(Boolean);
+}
+
+async function postUniqueId(uniqueid) {
+    const resp = await axios.get(API_ENDPOINT + '/process-call', { recordingUniqueId: uniqueid });
+    return resp;
+}
+
+async function main() {
+    try {
+
+        console.log(`Buscando uniqueids entre ${DATE_FROM} e ${DATE_TO}...`);
+        const uniqueids = await fetchUniqueIds(db, DATE_FROM, DATE_TO);
+        console.log(`Encontrados ${uniqueids.length} uniqueids.`);
+
+        // processa linha-a-linha (sequencial)
+        for (let i = 0; i < uniqueids.length; i++) {
+            const uniqueid = uniqueids[i];
+            try {
+                console.log(`[${i + 1}/${uniqueids.length}] Enviando uniqueid=${uniqueid}`);
+                const res = await postUniqueId(uniqueid);
+
+                const msg = `${new Date().toISOString()} | OK | ${uniqueid} | status:${res.status}`;
+                appendLog(SUCCESS_LOG, msg);
+                console.log(`  ✅ ${uniqueid} -> ${res.status}`);
+            } catch (err) {
+                const errMsg = `${new Date().toISOString()} | ERROR | ${uniqueid} | ${err.message}`;
+                appendLog(ERROR_LOG, errMsg);
+                console.error(`  ❌ ${uniqueid} -> ${err.message}`);
+            }
+        }
+
+        console.log('Processamento concluído.');
+    } catch (err) {
+        console.error('Erro geral:', err);
+    } finally {
+        if (db && db.end) await db.end();
     }
-  }
 }
 
-async function processAndUpload(filePath) {
-  try {
-    const parts = filePath.split(path.sep);
-    // Exemplo: [ ..., 'CEMIG - ESSENCIAL', '2025', '05', '06', '09', '32991994022', '1746534792.159_1001_20250506093313.wav']
-
-    const [walletName, year, month, day, hour, phone, filename] = parts.slice(-7);
-    const uniqueId = filename.split('_')[0];
-
-    const formData = new FormData();
-    formData.append('file', fs.createReadStream(filePath));
-    formData.append('wallet', WALLET_NAME);
-    formData.append('uniqueId', uniqueId);
-    formData.append('year', year);
-    formData.append('month', month);
-    formData.append('day', day);
-    formData.append('hour', hour);
-    formData.append('phone', phone);
-
-    const res = await axios.post(BUCKET_URL, formData, {
-      headers: formData.getHeaders(),
-      maxBodyLength: Infinity
-    });
-
-    console.log(`✅ Enviado: ${filename} (${res.status})`);
-  } catch (err) {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] Erro ao enviar "${filePath}": ${err.message}\n`;
-
-    console.error(`❌ ${logMessage}`);
-
-    // adiciona no arquivo de log
-    fs.appendFileSync(LOG_FILE, logMessage);
-  }
-}
-
-/**
- * Execução principal
- */
 (async () => {
-  console.log(`🚀 Iniciando upload de áudios do diretório: ${BASE_DIR}`);
-  await uploadAudios(BASE_DIR);
-  console.log('✅ Upload finalizado!');
+    main()
+        .then(() => console.log('🚀 Upload de chamadas concluído!'))
+        .catch(err => console.error('Erro geral:', err));
 })();

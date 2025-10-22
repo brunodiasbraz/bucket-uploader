@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
     "start:reprocess": "node reprocess_errors.js",
-    "start:incoming": "node upload_receptivas.js"
+    "start:incoming": "node upload_receptivas.js",
+    "start:history": "node upload_history_calls.js"
   },
   "author": "",
   "license": "ISC",
